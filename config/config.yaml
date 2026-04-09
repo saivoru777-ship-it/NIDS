@@ -1,0 +1,74 @@
+# Network Intrusion Detection System Configuration
+
+# Network Interface
+network:
+  interface: "en0"  # Change to your network interface (use 'ifconfig' or 'ip a' to find)
+  promiscuous_mode: true
+  packet_count: 0  # 0 for continuous capture
+
+# Signature-Based Detection
+signature_detection:
+  enabled: true
+  rules_file: "rules/signatures.json"
+
+  # Port Scan Detection
+  port_scan:
+    enabled: true
+    threshold: 20  # Number of unique ports
+    time_window: 60  # seconds
+
+  # SYN Flood Detection
+  syn_flood:
+    enabled: true
+    threshold: 100  # SYN packets without ACK
+    time_window: 10  # seconds
+
+  # ICMP Flood Detection
+  icmp_flood:
+    enabled: true
+    threshold: 50  # ICMP packets
+    time_window: 5  # seconds
+
+# Anomaly-Based Detection
+anomaly_detection:
+  enabled: true
+  baseline_collection_time: 300  # seconds (5 minutes) to establish baseline
+
+  # Traffic Volume Anomaly
+  traffic_volume:
+    enabled: true
+    std_deviation_threshold: 3  # Standard deviations from mean
+
+  # Protocol Distribution Anomaly
+  protocol_distribution:
+    enabled: true
+    deviation_threshold: 0.3  # 30% deviation from baseline
+
+  # Connection Pattern Anomaly
+  connection_pattern:
+    enabled: true
+    unusual_port_threshold: 0.95  # Ports used less than 5% in baseline
+
+# Logging
+logging:
+  enabled: true
+  log_directory: "logs"
+  log_format: "json"  # json or csv
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# Alerts
+alerts:
+  console_output: true
+  file_output: true
+
+  # Alert Severity Levels
+  severity_levels:
+    critical: ["syn_flood", "ddos", "malware"]
+    high: ["port_scan", "brute_force", "suspicious_payload"]
+    medium: ["anomaly_traffic", "unusual_protocol"]
+    low: ["informational"]
+
+# Analysis
+analysis:
+  top_talkers_count: 10
+  statistics_interval: 60  # seconds

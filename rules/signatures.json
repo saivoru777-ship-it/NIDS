@@ -1,0 +1,133 @@
+{
+  "signatures": [
+    {
+      "id": "SIG001",
+      "name": "SQL Injection Attempt",
+      "description": "Detects common SQL injection patterns in payload",
+      "severity": "high",
+      "patterns": [
+        "' OR '1'='1",
+        "' OR 1=1--",
+        "'; DROP TABLE",
+        "UNION SELECT",
+        "' AND 1=1--"
+      ],
+      "protocol": "TCP",
+      "ports": [80, 443, 8080]
+    },
+    {
+      "id": "SIG002",
+      "name": "XSS Attack Attempt",
+      "description": "Detects cross-site scripting patterns",
+      "severity": "high",
+      "patterns": [
+        "<script>alert(",
+        "javascript:",
+        "onerror=",
+        "<iframe src=",
+        "document.cookie"
+      ],
+      "protocol": "TCP",
+      "ports": [80, 443, 8080]
+    },
+    {
+      "id": "SIG003",
+      "name": "SSH Brute Force",
+      "description": "Multiple failed SSH connection attempts",
+      "severity": "high",
+      "protocol": "TCP",
+      "ports": [22],
+      "threshold": 5,
+      "time_window": 60
+    },
+    {
+      "id": "SIG004",
+      "name": "FTP Brute Force",
+      "description": "Multiple FTP connection attempts",
+      "severity": "medium",
+      "protocol": "TCP",
+      "ports": [21],
+      "threshold": 5,
+      "time_window": 60
+    },
+    {
+      "id": "SIG005",
+      "name": "Telnet Access",
+      "description": "Insecure Telnet protocol usage",
+      "severity": "medium",
+      "protocol": "TCP",
+      "ports": [23]
+    },
+    {
+      "id": "SIG006",
+      "name": "Suspicious DNS Query",
+      "description": "Potential DNS tunneling or exfiltration",
+      "severity": "medium",
+      "protocol": "UDP",
+      "ports": [53],
+      "patterns": [
+        "suspicious-domain",
+        "malware.com",
+        "c2server"
+      ]
+    },
+    {
+      "id": "SIG007",
+      "name": "SMB Exploitation",
+      "description": "Potential SMB/EternalBlue exploitation",
+      "severity": "critical",
+      "protocol": "TCP",
+      "ports": [445, 139]
+    },
+    {
+      "id": "SIG008",
+      "name": "RDP Brute Force",
+      "description": "Multiple RDP connection attempts",
+      "severity": "high",
+      "protocol": "TCP",
+      "ports": [3389],
+      "threshold": 5,
+      "time_window": 60
+    },
+    {
+      "id": "SIG009",
+      "name": "Suspicious Outbound Connection",
+      "description": "Connection to suspicious high ports",
+      "severity": "medium",
+      "protocol": "TCP",
+      "dst_port_range": [4444, 4445, 5555, 6666, 7777, 8888, 9999, 31337]
+    },
+    {
+      "id": "SIG010",
+      "name": "ICMP Ping Sweep",
+      "description": "Multiple ICMP echo requests indicating network scanning",
+      "severity": "low",
+      "protocol": "ICMP",
+      "threshold": 20,
+      "time_window": 10
+    },
+    {
+      "id": "SIG011",
+      "name": "ARP Spoofing",
+      "description": "Duplicate IP address with different MAC",
+      "severity": "critical",
+      "protocol": "ARP"
+    },
+    {
+      "id": "SIG012",
+      "name": "Suspicious User Agent",
+      "description": "Known malicious or scanning tool user agents",
+      "severity": "medium",
+      "patterns": [
+        "nikto",
+        "sqlmap",
+        "nmap",
+        "masscan",
+        "metasploit",
+        "burpsuite"
+      ],
+      "protocol": "TCP",
+      "ports": [80, 443]
+    }
+  ]
+}
