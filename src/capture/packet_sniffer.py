@@ -1,11 +1,16 @@
 """
 Packet Sniffer Module
-Captures network packets using Scapy and extracts relevant features
+Captures network packets using Scapy and extracts relevant features.
+Uses a queue to decouple capture from analysis, preventing packet loss.
 """
 
-from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
-from datetime import datetime
+import logging
+import queue
 import threading
+from datetime import datetime
+from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
+
+logger = logging.getLogger(__name__)
 
 
 class PacketSniffer:
@@ -26,6 +31,10 @@ class PacketSniffer:
         self.is_running = False
         self.packet_count = 0
         self.sniff_thread = None
+        self.worker_thread = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._packet_queue = queue.Queue(maxsize=10000)
 
     def extract_packet_info(self, packet):
         """
@@ -93,36 +102,61 @@ class PacketSniffer:
 
         return packet_info
 
-    def process_packet(self, packet):
-        """
-        Process each captured packet
-
-        Args:
-            packet: Scapy packet object
-        """
+    def _enqueue_packet(self, packet):
+        """Capture callback: extract info and put on queue"""
         try:
-            self.packet_count += 1
+            with self._lock:
+                self.packet_count += 1
             packet_info = self.extract_packet_info(packet)
-
-            # Call the callback function with packet info
-            if self.packet_callback:
-                self.packet_callback(packet_info)
-
+            try:
+                self._packet_queue.put_nowait(packet_info)
+            except queue.Full:
+                logger.warning("Packet queue full — dropping packet")
         except Exception as e:
-            print(f"Error processing packet: {e}")
+            logger.error("Error processing packet: %s", e)
+
+    def _worker(self):
+        """Worker thread: consume packets from queue and run analysis"""
+        while not self._stop_event.is_set():
+            try:
+                packet_info = self._packet_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                if self.packet_callback:
+                    self.packet_callback(packet_info)
+            except Exception as e:
+                logger.error("Error in packet analysis: %s", e)
+
+        # Drain remaining items on shutdown
+        while not self._packet_queue.empty():
+            try:
+                packet_info = self._packet_queue.get_nowait()
+                if self.packet_callback:
+                    self.packet_callback(packet_info)
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.error("Error draining packet queue: %s", e)
 
     def start_sniffing(self):
         """Start packet capture in a separate thread"""
         if self.is_running:
-            print("Sniffer is already running")
+            logger.warning("Sniffer is already running")
             return
 
         self.is_running = True
-        print(f"[*] Starting packet capture on interface: {self.interface}")
-        print("[*] Press Ctrl+C to stop")
+        self._stop_event.clear()
+        logger.info("Starting packet capture on interface: %s", self.interface)
+        logger.info("Press Ctrl+C to stop")
+
+        # Start worker thread for analysis
+        self.worker_thread = threading.Thread(target=self._worker, name='nids-worker')
+        self.worker_thread.daemon = True
+        self.worker_thread.start()
 
         # Start sniffing in a separate thread
-        self.sniff_thread = threading.Thread(target=self._sniff)
+        self.sniff_thread = threading.Thread(target=self._sniff, name='nids-sniffer')
         self.sniff_thread.daemon = True
         self.sniff_thread.start()
 
@@ -134,27 +168,39 @@ class PacketSniffer:
 
             sniff(
                 iface=self.interface,
-                prn=self.process_packet,
+                prn=self._enqueue_packet,
                 store=False,
                 count=packet_count if packet_count > 0 else 0,
-                promisc=promisc
+                promisc=promisc,
+                stop_filter=lambda _: self._stop_event.is_set()
             )
         except PermissionError:
-            print("[!] Error: Permission denied. Please run with sudo/administrator privileges")
+            logger.error("Permission denied. Please run with sudo/administrator privileges")
             self.is_running = False
         except Exception as e:
-            print(f"[!] Error during packet capture: {e}")
+            logger.error("Error during packet capture: %s", e)
             self.is_running = False
 
     def stop_sniffing(self):
-        """Stop packet capture"""
+        """Stop packet capture gracefully"""
+        self._stop_event.set()
         self.is_running = False
-        print(f"\n[*] Stopped packet capture. Total packets captured: {self.packet_count}")
+
+        # Wait for worker to drain queue
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=5)
+
+        with self._lock:
+            count = self.packet_count
+        logger.info("Stopped packet capture. Total packets captured: %d", count)
 
     def get_stats(self):
         """Get sniffer statistics"""
+        with self._lock:
+            count = self.packet_count
         return {
             'is_running': self.is_running,
-            'packet_count': self.packet_count,
-            'interface': self.interface
+            'packet_count': count,
+            'interface': self.interface,
+            'queue_depth': self._packet_queue.qsize()
         }

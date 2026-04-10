@@ -3,9 +3,13 @@ Anomaly-Based Detection Module
 Detects network anomalies using statistical analysis and behavioral profiling
 """
 
+import logging
+import threading
 import numpy as np
-from collections import defaultdict, Counter
-from datetime import datetime, timedelta
+from collections import Counter, deque
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class AnomalyDetector:
@@ -21,32 +25,37 @@ class AnomalyDetector:
         """
         self.config = config
         self.alert_callback = alert_callback
+        self._lock = threading.Lock()
 
         # Baseline collection
         self.baseline_collection_time = config.get('anomaly_detection', {}).get(
             'baseline_collection_time', 300
         )
-        self.baseline_start_time = datetime.now()
+        self.baseline_start_time = None  # set on first packet
         self.is_baseline_established = False
 
-        # Traffic metrics for baseline
+        # Traffic metrics for baseline (bounded)
         self.baseline_traffic_volume = []  # packets per minute
         self.baseline_protocol_dist = Counter()
         self.baseline_port_usage = Counter()
-        self.baseline_packet_sizes = []
-        self.baseline_connections = defaultdict(int)
+        self.baseline_packet_sizes = deque(maxlen=50000)
 
-        # Current window metrics
-        self.current_window_start = datetime.now()
+        # Current window metrics (bounded)
+        self.current_window_start = None  # set on first packet
         self.current_packets_count = 0
         self.current_protocol_dist = Counter()
         self.current_port_usage = Counter()
-        self.current_packet_sizes = []
-        self.current_connections = defaultdict(int)
+        self.current_packet_sizes = deque(maxlen=50000)
 
         # Statistics
         self.baseline_stats = {}
         self.anomaly_count = 0
+
+        # Baseline refresh: re-establish baseline every N seconds (default 1 hour)
+        self.baseline_refresh_interval = config.get('anomaly_detection', {}).get(
+            'baseline_refresh_interval', 3600
+        )
+        self.baseline_established_at = None
 
     def analyze_packet(self, packet_info):
         """
@@ -58,18 +67,39 @@ class AnomalyDetector:
         if not self.config.get('anomaly_detection', {}).get('enabled', True):
             return
 
-        current_time = packet_info['timestamp']
+        with self._lock:
+            current_time = packet_info['timestamp']
 
-        # Check if we're still collecting baseline
-        if not self.is_baseline_established:
-            self.collect_baseline(packet_info)
-            time_elapsed = (current_time - self.baseline_start_time).total_seconds()
-            if time_elapsed >= self.baseline_collection_time:
-                self.establish_baseline()
-        else:
-            # Perform anomaly detection
-            self.update_current_window(packet_info)
-            self.detect_anomalies(packet_info)
+            # Initialize start times on first packet
+            if self.baseline_start_time is None:
+                self.baseline_start_time = current_time
+            if self.current_window_start is None:
+                self.current_window_start = current_time
+
+            # Check if we're still collecting baseline
+            if not self.is_baseline_established:
+                self.collect_baseline(packet_info)
+                time_elapsed = (current_time - self.baseline_start_time).total_seconds()
+                if time_elapsed >= self.baseline_collection_time:
+                    self.establish_baseline()
+            else:
+                # Check if baseline refresh is due
+                if self.baseline_established_at and \
+                   (current_time - self.baseline_established_at).total_seconds() >= self.baseline_refresh_interval:
+                    logger.info("Baseline refresh triggered — re-collecting baseline...")
+                    self.is_baseline_established = False
+                    self.baseline_start_time = current_time
+                    self.baseline_traffic_volume = []
+                    self.baseline_protocol_dist = Counter()
+                    self.baseline_port_usage = Counter()
+                    self.baseline_packet_sizes = deque(maxlen=50000)
+                    self.current_packets_count = 0
+                    self.current_window_start = current_time
+                    return
+
+                # Perform anomaly detection
+                self.update_current_window(packet_info)
+                self.detect_anomalies(packet_info)
 
     def collect_baseline(self, packet_info):
         """
@@ -92,11 +122,6 @@ class AnomalyDetector:
         if packet_info['packet_size']:
             self.baseline_packet_sizes.append(packet_info['packet_size'])
 
-        # Collect connection patterns
-        if packet_info['src_ip'] and packet_info['dst_ip']:
-            conn_key = f"{packet_info['src_ip']}->{packet_info['dst_ip']}"
-            self.baseline_connections[conn_key] += 1
-
         # Update traffic volume per minute
         current_time = packet_info['timestamp']
         time_diff = (current_time - self.current_window_start).total_seconds()
@@ -107,7 +132,7 @@ class AnomalyDetector:
 
     def establish_baseline(self):
         """Establish baseline statistics from collected data"""
-        print("\n[*] Establishing baseline from collected data...")
+        logger.info("Establishing baseline from collected data...")
 
         # Calculate traffic volume statistics
         if self.baseline_traffic_volume:
@@ -146,20 +171,21 @@ class AnomalyDetector:
             self.baseline_stats['packet_size_std'] = 0
 
         self.is_baseline_established = True
+        self.baseline_established_at = datetime.now()
 
         # Print baseline summary
-        print(f"[+] Baseline established:")
-        print(f"    - Average traffic: {self.baseline_stats['traffic_volume_mean']:.2f} packets/min")
-        print(f"    - Protocol distribution: {dict(self.baseline_stats['protocol_distribution'])}")
-        print(f"    - Average packet size: {self.baseline_stats['packet_size_mean']:.2f} bytes")
-        print(f"[*] Now monitoring for anomalies...\n")
+        logger.info("Baseline established: avg traffic=%.2f packets/min, avg packet size=%.2f bytes",
+                     self.baseline_stats['traffic_volume_mean'],
+                     self.baseline_stats['packet_size_mean'])
+        logger.info("Protocol distribution: %s", dict(self.baseline_stats['protocol_distribution']))
+        logger.info("Now monitoring for anomalies...")
 
         # Reset current window
         self.current_window_start = datetime.now()
         self.current_packets_count = 0
         self.current_protocol_dist = Counter()
         self.current_port_usage = Counter()
-        self.current_packet_sizes = []
+        self.current_packet_sizes = deque(maxlen=50000)
 
     def update_current_window(self, packet_info):
         """
@@ -291,10 +317,8 @@ class AnomalyDetector:
 
     def detect_unusual_port(self, packet_info):
         """
-        Detect unusual port usage
-
-        Args:
-            packet_info (dict): Packet information
+        Detect unusual port usage — ports not seen or rarely seen during baseline.
+        A port is unusual if its baseline frequency is below the rarity threshold (default 5%).
         """
         dst_port = packet_info['dst_port']
         if not dst_port:
@@ -304,16 +328,15 @@ class AnomalyDetector:
         if not port_frequencies:
             return
 
-        # Check if port was rarely or never used in baseline
-        threshold = self.config.get('anomaly_detection', {}).get(
+        # Rarity threshold: ports used less than this fraction of total traffic are "unusual"
+        rarity_threshold = self.config.get('anomaly_detection', {}).get(
             'connection_pattern', {}
-        ).get('unusual_port_threshold', 0.95)
+        ).get('unusual_port_threshold', 0.05)
 
         baseline_freq = port_frequencies.get(dst_port, 0)
 
-        # If port wasn't in baseline or used very rarely, it's unusual
-        if baseline_freq == 0 or baseline_freq < (1 - threshold):
-            # Avoid alert spam - only alert on first occurrence
+        if baseline_freq < rarity_threshold:
+            # Only alert on first occurrence in current window
             if dst_port not in self.current_port_usage or self.current_port_usage[dst_port] == 1:
                 self.anomaly_count += 1
                 self.alert_callback({

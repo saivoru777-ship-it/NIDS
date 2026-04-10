@@ -5,9 +5,14 @@ Manages security alerts, logging, and notifications
 
 import json
 import csv
+import logging
 import os
+import threading
+from collections import deque
 from datetime import datetime
 from colorama import Fore, Style, init
+
+logger = logging.getLogger(__name__)
 
 # Initialize colorama for colored terminal output
 init(autoreset=True)
@@ -16,21 +21,26 @@ init(autoreset=True)
 class AlertManager:
     """Manages security alerts and logging"""
 
-    def __init__(self, config):
+    def __init__(self, config, database=None, notifier=None):
         """
         Initialize alert manager
 
         Args:
             config (dict): Configuration dictionary
+            database: Optional AlertDatabase instance for persistent storage
+            notifier: Optional EmailNotifier instance for email alerts
         """
         self.config = config
-        self.alerts = []
+        self._lock = threading.Lock()
+        self.alerts = deque(maxlen=10000)
         self.alert_count = {
             'critical': 0,
             'high': 0,
             'medium': 0,
             'low': 0
         }
+        self.database = database
+        self.notifier = notifier
 
         # Set up logging directory
         self.log_dir = config.get('logging', {}).get('log_directory', 'logs')
@@ -64,13 +74,28 @@ class AlertManager:
             alert_data['severity'] = self.determine_severity(alert_data['type'])
 
         # Add alert ID and timestamp
-        alert_data['alert_id'] = len(self.alerts) + 1
-        if 'timestamp' not in alert_data:
-            alert_data['timestamp'] = datetime.now()
+        with self._lock:
+            alert_data['alert_id'] = len(self.alerts) + 1
+            if 'timestamp' not in alert_data:
+                alert_data['timestamp'] = datetime.now()
 
-        # Store alert
-        self.alerts.append(alert_data)
-        self.alert_count[alert_data['severity']] += 1
+            # Store alert
+            self.alerts.append(alert_data)
+            self.alert_count[alert_data['severity']] += 1
+
+        # Send email notification
+        if self.notifier:
+            try:
+                self.notifier.notify(alert_data)
+            except Exception as e:
+                logger.error("Email notification error: %s", e)
+
+        # Persist to database
+        if self.database:
+            try:
+                self.database.store_alert(alert_data)
+            except Exception as e:
+                logger.error("Failed to store alert in database: %s", e)
 
         # Output to console
         if self.config.get('alerts', {}).get('console_output', True):
@@ -161,7 +186,7 @@ class AlertManager:
                 self.log_alert_csv(log_data)
 
         except Exception as e:
-            print(f"[!] Error logging alert: {e}")
+            logger.error("Error logging alert: %s", e)
 
     def log_alert_json(self, alert_data):
         """
@@ -244,7 +269,8 @@ class AlertManager:
         Returns:
             list: Recent alerts
         """
-        return self.alerts[-count:] if len(self.alerts) >= count else self.alerts
+        alerts_list = list(self.alerts)
+        return alerts_list[-count:] if len(alerts_list) >= count else alerts_list
 
     def print_summary(self):
         """Print alert summary"""
@@ -294,6 +320,6 @@ class AlertManager:
                 # Similar to log_alert_csv but for all alerts
                 pass
 
-            print(f"[+] Alerts exported to {filename}")
+            logger.info("Alerts exported to %s", filename)
         except Exception as e:
-            print(f"[!] Error exporting alerts: {e}")
+            logger.error("Error exporting alerts: %s", e)

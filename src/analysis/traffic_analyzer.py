@@ -3,8 +3,12 @@ Traffic Analyzer Module
 Analyzes network traffic patterns and provides statistics
 """
 
-from collections import Counter, defaultdict
+import logging
+import threading
+from collections import Counter, defaultdict, deque
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class TrafficAnalyzer:
@@ -18,6 +22,7 @@ class TrafficAnalyzer:
             config (dict): Configuration dictionary
         """
         self.config = config
+        self._lock = threading.Lock()
 
         # Traffic statistics
         self.total_packets = 0
@@ -25,7 +30,7 @@ class TrafficAnalyzer:
         self.src_ip_counter = Counter()
         self.dst_ip_counter = Counter()
         self.port_counter = Counter()
-        self.packet_sizes = []
+        self.packet_sizes = deque(maxlen=100000)
 
         # Connection tracking
         self.connections = defaultdict(int)
@@ -43,41 +48,42 @@ class TrafficAnalyzer:
         Args:
             packet_info (dict): Packet information dictionary
         """
-        self.total_packets += 1
+        with self._lock:
+            self.total_packets += 1
 
-        # Track protocol distribution
-        if packet_info['protocol']:
-            self.protocol_counter[packet_info['protocol']] += 1
+            # Track protocol distribution
+            if packet_info['protocol']:
+                self.protocol_counter[packet_info['protocol']] += 1
 
-        # Track source IPs
-        if packet_info['src_ip']:
-            self.src_ip_counter[packet_info['src_ip']] += 1
-            self.unique_src_ips.add(packet_info['src_ip'])
+            # Track source IPs
+            if packet_info['src_ip']:
+                self.src_ip_counter[packet_info['src_ip']] += 1
+                self.unique_src_ips.add(packet_info['src_ip'])
 
-        # Track destination IPs
-        if packet_info['dst_ip']:
-            self.dst_ip_counter[packet_info['dst_ip']] += 1
-            self.unique_dst_ips.add(packet_info['dst_ip'])
+            # Track destination IPs
+            if packet_info['dst_ip']:
+                self.dst_ip_counter[packet_info['dst_ip']] += 1
+                self.unique_dst_ips.add(packet_info['dst_ip'])
 
-        # Track port usage
-        if packet_info['dst_port']:
-            self.port_counter[packet_info['dst_port']] += 1
+            # Track port usage
+            if packet_info['dst_port']:
+                self.port_counter[packet_info['dst_port']] += 1
 
-        # Track packet sizes
-        if packet_info['packet_size']:
-            self.packet_sizes.append(packet_info['packet_size'])
+            # Track packet sizes
+            if packet_info['packet_size']:
+                self.packet_sizes.append(packet_info['packet_size'])
 
-        # Track connections
-        if packet_info['src_ip'] and packet_info['dst_ip']:
-            conn_key = f"{packet_info['src_ip']} -> {packet_info['dst_ip']}"
-            self.connections[conn_key] += 1
+            # Track connections
+            if packet_info['src_ip'] and packet_info['dst_ip']:
+                conn_key = f"{packet_info['src_ip']} -> {packet_info['dst_ip']}"
+                self.connections[conn_key] += 1
 
-        # Periodically print statistics
-        current_time = packet_info['timestamp']
-        stats_interval = self.config.get('analysis', {}).get('statistics_interval', 60)
-        if (current_time - self.last_stats_time).total_seconds() >= stats_interval:
-            self.print_statistics()
-            self.last_stats_time = current_time
+            # Periodically print statistics
+            current_time = packet_info['timestamp']
+            stats_interval = self.config.get('analysis', {}).get('statistics_interval', 60)
+            if (current_time - self.last_stats_time).total_seconds() >= stats_interval:
+                self.print_statistics()
+                self.last_stats_time = current_time
 
     def get_top_talkers(self, count=10):
         """
@@ -158,44 +164,40 @@ class TrafficAnalyzer:
 
     def print_statistics(self):
         """Print current traffic statistics"""
-        print("\n" + "=" * 60)
-        print("TRAFFIC STATISTICS")
-        print("=" * 60)
-
-        # Overall statistics
         elapsed_time = (datetime.now() - self.start_time).total_seconds()
-        print(f"\nTotal Packets Captured: {self.total_packets}")
-        print(f"Elapsed Time: {elapsed_time:.2f} seconds")
-        print(f"Traffic Rate: {self.get_traffic_rate():.2f} packets/sec")
-        print(f"Average Packet Size: {self.get_average_packet_size():.2f} bytes")
 
-        # Protocol distribution
-        print("\nProtocol Distribution:")
+        lines = [
+            "", "=" * 60, "TRAFFIC STATISTICS", "=" * 60,
+            f"\nTotal Packets Captured: {self.total_packets}",
+            f"Elapsed Time: {elapsed_time:.2f} seconds",
+            f"Traffic Rate: {self.get_traffic_rate():.2f} packets/sec",
+            f"Average Packet Size: {self.get_average_packet_size():.2f} bytes",
+            "\nProtocol Distribution:"
+        ]
+
         protocol_dist = self.get_protocol_distribution()
         for protocol, stats in sorted(protocol_dist.items(), key=lambda x: x[1]['count'], reverse=True):
-            print(f"  {protocol:10s}: {stats['count']:6d} packets ({stats['percentage']:.2f}%)")
+            lines.append(f"  {protocol:10s}: {stats['count']:6d} packets ({stats['percentage']:.2f}%)")
 
-        # Top talkers
-        print("\nTop Source IPs (Top Talkers):")
+        lines.append("\nTop Source IPs (Top Talkers):")
         top_count = self.config.get('analysis', {}).get('top_talkers_count', 10)
         for ip, count in self.get_top_talkers(top_count):
             percentage = (count / self.total_packets) * 100
-            print(f"  {ip:20s}: {count:6d} packets ({percentage:.2f}%)")
+            lines.append(f"  {ip:20s}: {count:6d} packets ({percentage:.2f}%)")
 
-        # Top destinations
-        print("\nTop Destination IPs:")
+        lines.append("\nTop Destination IPs:")
         for ip, count in self.get_top_destinations(top_count):
             percentage = (count / self.total_packets) * 100
-            print(f"  {ip:20s}: {count:6d} packets ({percentage:.2f}%)")
+            lines.append(f"  {ip:20s}: {count:6d} packets ({percentage:.2f}%)")
 
-        # Top ports
-        print("\nMost Accessed Ports:")
+        lines.append("\nMost Accessed Ports:")
         for port, count in self.get_top_ports(10):
             port_name = self.get_port_name(port)
             percentage = (count / self.total_packets) * 100
-            print(f"  {port:6d} ({port_name:15s}): {count:6d} packets ({percentage:.2f}%)")
+            lines.append(f"  {port:6d} ({port_name:15s}): {count:6d} packets ({percentage:.2f}%)")
 
-        print("=" * 60 + "\n")
+        lines.append("=" * 60)
+        logger.info("\n".join(lines))
 
     def get_port_name(self, port):
         """

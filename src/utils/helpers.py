@@ -4,8 +4,12 @@ Common utility functions for NIDS
 """
 
 import yaml
+import json
+import logging
 import os
 import sys
+
+logger = logging.getLogger(__name__)
 
 
 def load_config(config_file='config/config.yaml'):
@@ -23,10 +27,10 @@ def load_config(config_file='config/config.yaml'):
             config = yaml.safe_load(f)
         return config
     except FileNotFoundError:
-        print(f"[!] Configuration file not found: {config_file}")
+        logger.critical("Configuration file not found: %s", config_file)
         sys.exit(1)
     except yaml.YAMLError as e:
-        print(f"[!] Error parsing configuration file: {e}")
+        logger.critical("Error parsing configuration file: %s", e)
         sys.exit(1)
 
 
@@ -40,18 +44,18 @@ def check_privileges():
     if os.name == 'posix':
         # Unix/Linux/macOS
         if os.geteuid() != 0:
-            print("[!] This program requires root privileges to capture packets.")
-            print("[!] Please run with sudo: sudo python3 main.py")
+            logger.error("This program requires root privileges to capture packets.")
+            logger.error("Please run with sudo: sudo python3 main.py")
             return False
     elif os.name == 'nt':
         # Windows
         try:
             import ctypes
             if not ctypes.windll.shell32.IsUserAnAdmin():
-                print("[!] This program requires administrator privileges.")
-                print("[!] Please run as administrator.")
+                logger.error("This program requires administrator privileges.")
+                logger.error("Please run as administrator.")
                 return False
-        except:
+        except (ImportError, AttributeError, OSError):
             pass
 
     return True
@@ -69,7 +73,7 @@ def get_available_interfaces():
         interfaces = get_if_list()
         return interfaces
     except Exception as e:
-        print(f"[!] Error getting network interfaces: {e}")
+        logger.error("Error getting network interfaces: %s", e)
         return []
 
 
@@ -128,7 +132,7 @@ def validate_ip(ip_address):
             if num < 0 or num > 255:
                 return False
         return True
-    except:
+    except (ValueError, AttributeError):
         return False
 
 
@@ -170,13 +174,12 @@ def save_state(state_data, filename='nids_state.json'):
         state_data (dict): State data to save
         filename (str): Output filename
     """
-    import json
     try:
         with open(filename, 'w') as f:
             json.dump(state_data, f, indent=2)
-        print(f"[+] State saved to {filename}")
+        logger.info("State saved to %s", filename)
     except Exception as e:
-        print(f"[!] Error saving state: {e}")
+        logger.error("Error saving state: %s", e)
 
 
 def load_state(filename='nids_state.json'):
@@ -189,15 +192,14 @@ def load_state(filename='nids_state.json'):
     Returns:
         dict: State data or None if error
     """
-    import json
     try:
         with open(filename, 'r') as f:
             state_data = json.load(f)
-        print(f"[+] State loaded from {filename}")
+        logger.info("State loaded from %s", filename)
         return state_data
     except FileNotFoundError:
-        print(f"[!] State file not found: {filename}")
+        logger.warning("State file not found: %s", filename)
         return None
     except Exception as e:
-        print(f"[!] Error loading state: {e}")
+        logger.error("Error loading state: %s", e)
         return None

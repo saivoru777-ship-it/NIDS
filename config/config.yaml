@@ -33,6 +33,7 @@ signature_detection:
 anomaly_detection:
   enabled: true
   baseline_collection_time: 300  # seconds (5 minutes) to establish baseline
+  baseline_refresh_interval: 3600  # seconds (1 hour) to re-collect baseline
 
   # Traffic Volume Anomaly
   traffic_volume:
@@ -47,7 +48,7 @@ anomaly_detection:
   # Connection Pattern Anomaly
   connection_pattern:
     enabled: true
-    unusual_port_threshold: 0.95  # Ports used less than 5% in baseline
+    unusual_port_threshold: 0.05  # Ports used less than 5% of total traffic are flagged
 
 # Logging
 logging:
@@ -67,6 +68,25 @@ alerts:
     high: ["port_scan", "brute_force", "suspicious_payload"]
     medium: ["anomaly_traffic", "unusual_protocol"]
     low: ["informational"]
+
+# Email Notifications
+notifications:
+  email:
+    enabled: false
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    use_tls: true
+    username: ""
+    password: ""
+    from_addr: ""
+    recipients: []
+    min_severity: "high"  # Send emails for 'high' and 'critical'
+    cooldown_seconds: 300  # Max 1 email per alert type per 5 minutes
+
+# Web Dashboard
+dashboard:
+  enabled: true
+  port: 5000
 
 # Analysis
 analysis:

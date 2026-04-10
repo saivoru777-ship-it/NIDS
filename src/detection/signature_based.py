@@ -4,8 +4,13 @@ Detects known attack patterns using signature matching
 """
 
 import json
-from datetime import datetime, timedelta
-from collections import defaultdict
+import logging
+import threading
+from urllib.parse import unquote
+from datetime import datetime
+from collections import defaultdict, deque
+
+logger = logging.getLogger(__name__)
 
 
 class SignatureDetector:
@@ -25,11 +30,16 @@ class SignatureDetector:
         self.load_signatures()
 
         # Tracking dictionaries for various attacks
-        self.port_scan_tracker = defaultdict(lambda: {'ports': set(), 'first_seen': None})
+        self._lock = threading.Lock()
+        # Sliding window: store (timestamp, port) tuples instead of just a set
+        self.port_scan_tracker = defaultdict(lambda: deque(maxlen=500))
         self.syn_flood_tracker = defaultdict(lambda: {'syn_count': 0, 'ack_count': 0, 'first_seen': None})
         self.icmp_flood_tracker = defaultdict(lambda: {'count': 0, 'first_seen': None})
-        self.connection_attempts = defaultdict(lambda: defaultdict(lambda: {'count': 0, 'first_seen': None}))
         self.arp_cache = {}  # IP -> MAC mapping
+        self._last_cleanup = datetime.now()
+        # Alert deduplication: (alert_type, src_ip) -> last_alert_time
+        self._alert_cooldowns = {}
+        self._alert_cooldown_secs = 60  # suppress duplicate alerts within this window
 
     def load_signatures(self):
         """Load attack signatures from JSON file"""
@@ -38,9 +48,9 @@ class SignatureDetector:
             with open(rules_file, 'r') as f:
                 data = json.load(f)
                 self.signatures = data.get('signatures', [])
-            print(f"[*] Loaded {len(self.signatures)} attack signatures")
+            logger.info("Loaded %d attack signatures", len(self.signatures))
         except Exception as e:
-            print(f"[!] Error loading signatures: {e}")
+            logger.error("Error loading signatures: %s", e)
             self.signatures = []
 
     def analyze_packet(self, packet_info):
@@ -53,30 +63,65 @@ class SignatureDetector:
         if not self.config.get('signature_detection', {}).get('enabled', True):
             return
 
-        # Check for port scanning
-        if self.config.get('signature_detection', {}).get('port_scan', {}).get('enabled', True):
-            self.detect_port_scan(packet_info)
+        with self._lock:
+            # Periodic cleanup of stale tracker entries
+            self._cleanup_stale_entries(packet_info['timestamp'])
 
-        # Check for SYN flood
-        if self.config.get('signature_detection', {}).get('syn_flood', {}).get('enabled', True):
-            self.detect_syn_flood(packet_info)
+            # Check for port scanning
+            if self.config.get('signature_detection', {}).get('port_scan', {}).get('enabled', True):
+                self.detect_port_scan(packet_info)
 
-        # Check for ICMP flood
-        if self.config.get('signature_detection', {}).get('icmp_flood', {}).get('enabled', True):
-            self.detect_icmp_flood(packet_info)
+            # Check for SYN flood
+            if self.config.get('signature_detection', {}).get('syn_flood', {}).get('enabled', True):
+                self.detect_syn_flood(packet_info)
 
-        # Check for ARP spoofing
-        self.detect_arp_spoofing(packet_info)
+            # Check for ICMP flood
+            if self.config.get('signature_detection', {}).get('icmp_flood', {}).get('enabled', True):
+                self.detect_icmp_flood(packet_info)
 
-        # Check against loaded signatures
-        self.check_signatures(packet_info)
+            # Check for ARP spoofing
+            self.detect_arp_spoofing(packet_info)
+
+            # Check against loaded signatures
+            self.check_signatures(packet_info)
+
+    def _cleanup_stale_entries(self, current_time):
+        """Remove tracker entries older than 2x their time window"""
+        if (current_time - self._last_cleanup).total_seconds() < 30:
+            return
+        self._last_cleanup = current_time
+
+        ps_window = self.config.get('signature_detection', {}).get('port_scan', {}).get('time_window', 60) * 2
+        for ip in list(self.port_scan_tracker):
+            window = self.port_scan_tracker[ip]
+            if not window or (current_time - window[-1][0]).total_seconds() > ps_window:
+                del self.port_scan_tracker[ip]
+
+        sf_window = self.config.get('signature_detection', {}).get('syn_flood', {}).get('time_window', 10) * 2
+        for ip in list(self.syn_flood_tracker):
+            if self.syn_flood_tracker[ip]['first_seen'] and \
+               (current_time - self.syn_flood_tracker[ip]['first_seen']).total_seconds() > sf_window:
+                del self.syn_flood_tracker[ip]
+
+        icmp_window = self.config.get('signature_detection', {}).get('icmp_flood', {}).get('time_window', 5) * 2
+        for ip in list(self.icmp_flood_tracker):
+            if self.icmp_flood_tracker[ip]['first_seen'] and \
+               (current_time - self.icmp_flood_tracker[ip]['first_seen']).total_seconds() > icmp_window:
+                del self.icmp_flood_tracker[ip]
+
+    def _should_suppress_alert(self, alert_type, src_ip, current_time):
+        """Check if this alert should be suppressed (deduplication)"""
+        key = (alert_type, src_ip)
+        last_time = self._alert_cooldowns.get(key)
+        if last_time and (current_time - last_time).total_seconds() < self._alert_cooldown_secs:
+            return True
+        self._alert_cooldowns[key] = current_time
+        return False
 
     def detect_port_scan(self, packet_info):
         """
-        Detect port scanning attempts
-
-        Args:
-            packet_info (dict): Packet information
+        Detect port scanning using a sliding window approach.
+        Keeps timestamped port entries and evicts those outside the window.
         """
         if packet_info['protocol'] != 'TCP' or not packet_info['dst_port']:
             return
@@ -85,22 +130,23 @@ class SignatureDetector:
         dst_port = packet_info['dst_port']
         current_time = packet_info['timestamp']
 
-        # Track unique ports accessed by this IP
-        if src_ip not in self.port_scan_tracker:
-            self.port_scan_tracker[src_ip]['first_seen'] = current_time
-
-        self.port_scan_tracker[src_ip]['ports'].add(dst_port)
-
-        # Check if time window has passed
         time_window = self.config.get('signature_detection', {}).get('port_scan', {}).get('time_window', 60)
         threshold = self.config.get('signature_detection', {}).get('port_scan', {}).get('threshold', 20)
 
-        first_seen = self.port_scan_tracker[src_ip]['first_seen']
-        time_diff = (current_time - first_seen).total_seconds()
+        # Add current event to sliding window
+        self.port_scan_tracker[src_ip].append((current_time, dst_port))
 
-        if time_diff <= time_window:
-            port_count = len(self.port_scan_tracker[src_ip]['ports'])
-            if port_count >= threshold:
+        # Evict entries outside the time window
+        window = self.port_scan_tracker[src_ip]
+        while window and (current_time - window[0][0]).total_seconds() > time_window:
+            window.popleft()
+
+        # Count unique ports in the current window
+        unique_ports = {port for _, port in window}
+        port_count = len(unique_ports)
+
+        if port_count >= threshold:
+            if not self._should_suppress_alert('port_scan', src_ip, current_time):
                 self.alert_callback({
                     'type': 'port_scan',
                     'severity': 'high',
@@ -110,16 +156,10 @@ class SignatureDetector:
                     'description': f"Port scan detected: {port_count} unique ports scanned",
                     'details': {
                         'port_count': port_count,
-                        'time_window': time_diff
+                        'time_window': time_window
                     }
                 })
-                # Reset tracker
-                self.port_scan_tracker[src_ip]['ports'].clear()
-                self.port_scan_tracker[src_ip]['first_seen'] = current_time
-        else:
-            # Reset if time window exceeded
-            self.port_scan_tracker[src_ip]['ports'].clear()
-            self.port_scan_tracker[src_ip]['first_seen'] = current_time
+                window.clear()
 
     def detect_syn_flood(self, packet_info):
         """
@@ -306,14 +346,16 @@ class SignatureDetector:
             if packet_info['dst_port'] not in signature['ports']:
                 return False
 
-        # Check patterns in payload
+        # Check patterns in payload (also URL-decode to catch encoded attacks)
         if 'patterns' in signature and packet_info['payload']:
             try:
                 payload_str = packet_info['payload'].decode('utf-8', errors='ignore').lower()
+                decoded_payload = unquote(payload_str)
                 for pattern in signature['patterns']:
-                    if pattern.lower() in payload_str:
+                    pat = pattern.lower()
+                    if pat in payload_str or pat in decoded_payload:
                         return True
-            except:
+            except (UnicodeDecodeError, AttributeError):
                 pass
 
         # Check suspicious destination port ranges

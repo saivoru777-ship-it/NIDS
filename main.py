@@ -5,6 +5,8 @@ Main entry point for the NIDS application
 """
 
 import argparse
+import logging
+import logging.handlers
 import signal
 import sys
 import os
@@ -17,6 +19,10 @@ from detection.signature_based import SignatureDetector
 from detection.anomaly_based import AnomalyDetector
 from analysis.traffic_analyzer import TrafficAnalyzer
 from alerts.alert_manager import AlertManager
+from alerts.notifier import EmailNotifier
+from dashboard.app import start_dashboard
+from storage.database import AlertDatabase
+from utils.health import HealthMonitor
 from utils.helpers import (
     load_config,
     check_privileges,
@@ -24,6 +30,37 @@ from utils.helpers import (
     print_banner,
     create_directory_structure
 )
+
+logger = logging.getLogger('nids')
+
+
+def setup_logging(config):
+    """Configure the logging system based on config.yaml settings"""
+    log_level = config.get('logging', {}).get('log_level', 'INFO')
+    log_dir = config.get('logging', {}).get('log_directory', 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, log_level, logging.INFO))
+
+    # Console handler with color-friendly format
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        datefmt='%H:%M:%S'
+    ))
+    root_logger.addHandler(console)
+
+    # Rotating file handler (5 MB, keep 5 backups)
+    file_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(log_dir, 'nids.log'),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5
+    )
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+    ))
+    root_logger.addHandler(file_handler)
 
 
 class NIDS:
@@ -38,10 +75,18 @@ class NIDS:
             interface (str): Network interface to monitor
         """
         self.config = load_config(config_file)
-        self.interface = interface or self.config.get('network', {}).get('interface', 'en0')
+        self.interface = interface or self.config.get('network', {}).get('interface')
+        if not self.interface:
+            logger.critical("No network interface specified. Use -i flag or set network.interface in config.")
+            sys.exit(1)
 
-        # Initialize components
-        self.alert_manager = AlertManager(self.config)
+        # Initialize health monitor, database, notifier, and components
+        self.health = HealthMonitor()
+        log_dir = self.config.get('logging', {}).get('log_directory', 'logs')
+        self.database = AlertDatabase(os.path.join(log_dir, 'nids_alerts.db'))
+        self.notifier = EmailNotifier(self.config)
+        self.alert_manager = AlertManager(self.config, database=self.database,
+                                          notifier=self.notifier)
         self.signature_detector = SignatureDetector(
             self.config,
             self.alert_manager.handle_alert
@@ -58,6 +103,7 @@ class NIDS:
         )
 
         self.is_running = False
+        self._shutdown_event = threading.Event()
 
     def process_packet(self, packet_info):
         """
@@ -84,57 +130,56 @@ class NIDS:
             sys.exit(1)
 
         # Display configuration
-        print(f"[*] Network Interface: {self.interface}")
-        print(f"[*] Signature Detection: {'Enabled' if self.config.get('signature_detection', {}).get('enabled') else 'Disabled'}")
-        print(f"[*] Anomaly Detection: {'Enabled' if self.config.get('anomaly_detection', {}).get('enabled') else 'Disabled'}")
+        logger.info("Network Interface: %s", self.interface)
+        logger.info("Signature Detection: %s",
+                     'Enabled' if self.config.get('signature_detection', {}).get('enabled') else 'Disabled')
+        logger.info("Anomaly Detection: %s",
+                     'Enabled' if self.config.get('anomaly_detection', {}).get('enabled') else 'Disabled')
 
         if self.config.get('anomaly_detection', {}).get('enabled'):
             baseline_time = self.config.get('anomaly_detection', {}).get('baseline_collection_time', 300)
-            print(f"[*] Baseline Collection Time: {baseline_time} seconds")
+            logger.info("Baseline Collection Time: %d seconds", baseline_time)
 
-        print("")
+        # Start web dashboard
+        dashboard_config = self.config.get('dashboard', {})
+        if dashboard_config.get('enabled', True):
+            dash_port = dashboard_config.get('port', 5000)
+            start_dashboard(self.alert_manager, self.traffic_analyzer,
+                            database=self.database, health_monitor=self.health,
+                            port=dash_port)
 
         # Start packet capture
         self.is_running = True
         self.packet_sniffer.start_sniffing()
 
-        # Keep main thread alive
+        # Keep main thread alive using event-based wait (responsive to signals)
         try:
-            while self.is_running:
-                import time
-                time.sleep(1)
+            self._shutdown_event.wait()
         except KeyboardInterrupt:
             self.stop()
 
     def stop(self):
         """Stop the NIDS"""
-        print("\n[*] Shutting down NIDS...")
+        logger.info("Shutting down NIDS...")
         self.is_running = False
+        self._shutdown_event.set()
         self.packet_sniffer.stop_sniffing()
 
         # Print final statistics
-        print("\n" + "=" * 60)
-        print("FINAL STATISTICS")
-        print("=" * 60)
-
-        # Sniffer stats
         sniffer_stats = self.packet_sniffer.get_stats()
-        print(f"\nPackets Captured: {sniffer_stats['packet_count']}")
+        logger.info("Packets Captured: %d", sniffer_stats['packet_count'])
 
-        # Detection stats
         sig_stats = self.signature_detector.get_statistics()
-        print(f"\nSignature Detection:")
-        print(f"  Loaded Signatures: {sig_stats['signatures_loaded']}")
+        logger.info("Loaded Signatures: %d", sig_stats['signatures_loaded'])
 
         anom_stats = self.anomaly_detector.get_statistics()
-        print(f"\nAnomaly Detection:")
-        print(f"  Baseline Established: {anom_stats['baseline_established']}")
-        print(f"  Anomalies Detected: {anom_stats['anomaly_count']}")
+        logger.info("Baseline Established: %s", anom_stats['baseline_established'])
+        logger.info("Anomalies Detected: %d", anom_stats['anomaly_count'])
 
         # Alert summary
         self.alert_manager.print_summary()
 
-        print("[*] NIDS stopped successfully")
+        logger.info("NIDS stopped successfully")
 
 
 def main():
@@ -159,10 +204,11 @@ Note: Root/Administrator privileges required for packet capture
         default=None
     )
 
+    default_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'config.yaml')
     parser.add_argument(
         '-c', '--config',
         help='Configuration file path',
-        default='config/config.yaml'
+        default=default_config
     )
 
     parser.add_argument(
@@ -184,6 +230,10 @@ Note: Root/Administrator privileges required for packet capture
     # Create necessary directories
     create_directory_structure()
 
+    # Load config early so we can set up logging
+    config = load_config(args.config)
+    setup_logging(config)
+
     # Initialize and start NIDS
     try:
         nids = NIDS(config_file=args.config, interface=args.interface)
@@ -200,9 +250,7 @@ Note: Root/Administrator privileges required for packet capture
         nids.start()
 
     except Exception as e:
-        print(f"[!] Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.critical("Fatal error: %s", e, exc_info=True)
         sys.exit(1)
 
 

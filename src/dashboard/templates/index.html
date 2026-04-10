@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NIDS Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+               background: #0d1117; color: #c9d1d9; }
+        .header { background: #161b22; padding: 16px 24px; border-bottom: 1px solid #30363d; }
+        .header h1 { font-size: 20px; color: #58a6ff; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+        .card h3 { color: #8b949e; font-size: 12px; text-transform: uppercase; margin-bottom: 8px; }
+        .card .value { font-size: 28px; font-weight: bold; }
+        .severity-critical { color: #f85149; }
+        .severity-high { color: #d29922; }
+        .severity-medium { color: #58a6ff; }
+        .severity-low { color: #3fb950; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #21262d; font-size: 13px; }
+        th { color: #8b949e; font-weight: 600; }
+        .badge { padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .badge-critical { background: #f8514933; color: #f85149; }
+        .badge-high { background: #d2992233; color: #d29922; }
+        .badge-medium { background: #58a6ff33; color: #58a6ff; }
+        .badge-low { background: #3fb95033; color: #3fb950; }
+        #status { float: right; font-size: 12px; color: #3fb950; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>NIDS Dashboard <span id="status">Connected</span></h1>
+    </div>
+    <div class="container">
+        <div class="grid" id="summary-cards"></div>
+
+        <div class="card">
+            <h3>Traffic Overview</h3>
+            <div id="traffic-stats"></div>
+        </div>
+
+        <div class="card" style="margin-top: 16px;">
+            <h3>Recent Alerts</h3>
+            <table>
+                <thead><tr><th>Time</th><th>Severity</th><th>Type</th><th>Source</th><th>Description</th></tr></thead>
+                <tbody id="alerts-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        async function fetchJSON(url) {
+            const res = await fetch(url);
+            return res.json();
+        }
+
+        function renderSummary(data) {
+            const el = document.getElementById('summary-cards');
+            const sev = data.by_severity || {};
+            el.innerHTML = `
+                <div class="card"><h3>Total Alerts</h3><div class="value">${data.total || data.total_alerts || 0}</div></div>
+                <div class="card"><h3>Critical</h3><div class="value severity-critical">${sev.critical || 0}</div></div>
+                <div class="card"><h3>High</h3><div class="value severity-high">${sev.high || 0}</div></div>
+                <div class="card"><h3>Medium</h3><div class="value severity-medium">${sev.medium || 0}</div></div>
+                <div class="card"><h3>Low</h3><div class="value severity-low">${sev.low || 0}</div></div>
+            `;
+        }
+
+        function renderTraffic(data) {
+            const el = document.getElementById('traffic-stats');
+            const topT = (data.top_talkers || []).map(t => `${t.ip}: ${t.count}`).join(', ') || 'N/A';
+            el.innerHTML = `
+                <table>
+                    <tr><td>Total Packets</td><td>${data.total_packets}</td></tr>
+                    <tr><td>Traffic Rate</td><td>${(data.traffic_rate || 0).toFixed(2)} pkt/s</td></tr>
+                    <tr><td>Avg Packet Size</td><td>${(data.avg_packet_size || 0).toFixed(0)} bytes</td></tr>
+                    <tr><td>Top Talkers</td><td>${topT}</td></tr>
+                </table>
+            `;
+        }
+
+        function renderAlerts(alerts) {
+            const tbody = document.getElementById('alerts-body');
+            if (!alerts.length) { tbody.innerHTML = '<tr><td colspan="5">No alerts yet</td></tr>'; return; }
+            tbody.innerHTML = alerts.reverse().map(a => `
+                <tr>
+                    <td>${(a.timestamp || '').substring(0, 19)}</td>
+                    <td><span class="badge badge-${a.severity}">${a.severity}</span></td>
+                    <td>${a.type}</td>
+                    <td>${a.src_ip || '-'}</td>
+                    <td>${a.description || ''}</td>
+                </tr>
+            `).join('');
+        }
+
+        async function refresh() {
+            try {
+                const [summary, traffic, alerts] = await Promise.all([
+                    fetchJSON('/api/alerts/summary'),
+                    fetchJSON('/api/stats/traffic'),
+                    fetchJSON('/api/alerts/recent'),
+                ]);
+                renderSummary(summary);
+                renderTraffic(traffic);
+                renderAlerts(alerts);
+                document.getElementById('status').textContent = 'Connected';
+                document.getElementById('status').style.color = '#3fb950';
+            } catch (e) {
+                document.getElementById('status').textContent = 'Disconnected';
+                document.getElementById('status').style.color = '#f85149';
+            }
+        }
+
+        refresh();
+        setInterval(refresh, 5000);
+    </script>
+</body>
+</html>
