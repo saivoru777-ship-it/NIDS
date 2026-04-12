@@ -271,14 +271,15 @@ Each alert contains:
 - ✅ **Phase 1**: Foundation & packet capture (Weeks 1-2)
 - ✅ **Phase 2**: Signature-based detection (Weeks 3-4)
 - ✅ **Phase 3**: Anomaly-based detection (Weeks 5-7)
-- ⏳ **Phase 4**: Integration & alerting (Weeks 8-9)
-- ⏳ **Phase 5**: Testing & documentation (Weeks 10-12)
+- ✅ **Phase 4**: Integration & alerting — SQLite DB, Flask dashboard, email notifications (Weeks 8-9)
+- ✅ **Phase 5**: Testing & documentation — 60+ unit tests, GitHub Actions CI (Weeks 10-12)
 
 ## Technical Stack
 
 - **Scapy**: Packet manipulation and capture
 - **NumPy**: Statistical computations
-- **Pandas**: Data analysis
+- **Flask**: Web dashboard
+- **SQLite**: Persistent alert storage
 - **PyYAML**: Configuration management
 - **Colorama**: Colored terminal output
 
@@ -328,16 +329,16 @@ pip install -r requirements.txt
 
 Potential improvements for advanced versions:
 
+- [x] Web dashboard for visualization (Flask — implemented)
+- [x] Database integration (SQLite — implemented)
+- [x] Email notifications (SMTP — implemented)
 - [ ] Machine learning-based anomaly detection
-- [ ] Web dashboard for visualization
-- [ ] Database integration (PostgreSQL/MongoDB)
-- [ ] Email/SMS notifications
 - [ ] Distributed NIDS deployment
 - [ ] Deep packet inspection (DPI)
 - [ ] Integration with SIEM systems
 - [ ] Protocol-specific analyzers
 - [ ] Geolocation of attackers
-- [ ] Automated response mechanisms
+- [ ] Automated response mechanisms (firewall rules)
 
 ## Contributing
 

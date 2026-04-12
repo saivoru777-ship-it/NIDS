@@ -45,6 +45,12 @@ Thumbs.db
 nids_state.json
 *.pcap
 *.cap
+*.db
+
+# Testing
+.pytest_cache/
+coverage.xml
+htmlcov/
 
 # Jupyter Notebook
 .ipynb_checkpoints
