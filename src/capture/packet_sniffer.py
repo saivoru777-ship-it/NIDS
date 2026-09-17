@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class PacketSniffer:
     """Captures and processes network packets"""
 
-    def __init__(self, interface, packet_callback, config):
+    def __init__(self, interface, packet_callback, config, health_monitor=None):
         """
         Initialize packet sniffer
 
@@ -24,10 +24,14 @@ class PacketSniffer:
             interface (str): Network interface to sniff on
             packet_callback (function): Callback function to process packets
             config (dict): Configuration dictionary
+            health_monitor (HealthMonitor, optional): Records dropped packets so
+                queue overflow is a metric you can alert on, not just a log line.
         """
         self.interface = interface
         self.packet_callback = packet_callback
         self.config = config
+        self.health_monitor = health_monitor
+        self.packets_dropped = 0
         self.is_running = False
         self.packet_count = 0
         self.sniff_thread = None
@@ -111,7 +115,16 @@ class PacketSniffer:
             try:
                 self._packet_queue.put_nowait(packet_info)
             except queue.Full:
-                logger.warning("Packet queue full — dropping packet")
+                # Drop rather than block: the capture callback must return fast
+                # or the kernel buffer overflows behind us. Count every drop and
+                # log only periodically, since an attack that fills the queue
+                # would otherwise flood the log too.
+                self.packets_dropped += 1
+                if self.health_monitor:
+                    self.health_monitor.record_drop()
+                if self.packets_dropped == 1 or self.packets_dropped % 1000 == 0:
+                    logger.warning("Packet queue full — dropped %d packet(s) so far",
+                                   self.packets_dropped)
         except Exception as e:
             logger.error("Error processing packet: %s", e)
 
@@ -202,5 +215,6 @@ class PacketSniffer:
             'is_running': self.is_running,
             'packet_count': count,
             'interface': self.interface,
-            'queue_depth': self._packet_queue.qsize()
+            'queue_depth': self._packet_queue.qsize(),
+            'packets_dropped': self.packets_dropped
         }

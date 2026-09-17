@@ -13,7 +13,11 @@
         "' AND 1=1--"
       ],
       "protocol": "TCP",
-      "ports": [80, 443, 8080]
+      "ports": [
+        80,
+        443,
+        8080
+      ]
     },
     {
       "id": "SIG002",
@@ -28,7 +32,11 @@
         "document.cookie"
       ],
       "protocol": "TCP",
-      "ports": [80, 443, 8080]
+      "ports": [
+        80,
+        443,
+        8080
+      ]
     },
     {
       "id": "SIG003",
@@ -36,7 +44,9 @@
       "description": "Multiple failed SSH connection attempts",
       "severity": "high",
       "protocol": "TCP",
-      "ports": [22],
+      "ports": [
+        22
+      ],
       "threshold": 5,
       "time_window": 60
     },
@@ -46,7 +56,9 @@
       "description": "Multiple FTP connection attempts",
       "severity": "medium",
       "protocol": "TCP",
-      "ports": [21],
+      "ports": [
+        21
+      ],
       "threshold": 5,
       "time_window": 60
     },
@@ -56,7 +68,9 @@
       "description": "Insecure Telnet protocol usage",
       "severity": "medium",
       "protocol": "TCP",
-      "ports": [23]
+      "ports": [
+        23
+      ]
     },
     {
       "id": "SIG006",
@@ -64,7 +78,9 @@
       "description": "Potential DNS tunneling or exfiltration",
       "severity": "medium",
       "protocol": "UDP",
-      "ports": [53],
+      "ports": [
+        53
+      ],
       "patterns": [
         "suspicious-domain",
         "malware.com",
@@ -77,7 +93,10 @@
       "description": "Potential SMB/EternalBlue exploitation",
       "severity": "critical",
       "protocol": "TCP",
-      "ports": [445, 139]
+      "ports": [
+        445,
+        139
+      ]
     },
     {
       "id": "SIG008",
@@ -85,7 +104,9 @@
       "description": "Multiple RDP connection attempts",
       "severity": "high",
       "protocol": "TCP",
-      "ports": [3389],
+      "ports": [
+        3389
+      ],
       "threshold": 5,
       "time_window": 60
     },
@@ -95,7 +116,16 @@
       "description": "Connection to suspicious high ports",
       "severity": "medium",
       "protocol": "TCP",
-      "dst_port_range": [4444, 4445, 5555, 6666, 7777, 8888, 9999, 31337]
+      "dst_port_range": [
+        4444,
+        4445,
+        5555,
+        6666,
+        7777,
+        8888,
+        9999,
+        31337
+      ]
     },
     {
       "id": "SIG010",
@@ -111,7 +141,9 @@
       "name": "ARP Spoofing",
       "description": "Duplicate IP address with different MAC",
       "severity": "critical",
-      "protocol": "ARP"
+      "protocol": "ARP",
+      "handled_by": "detect_arp_spoofing",
+      "notes": "ARP has no port or payload discriminator, so matching it here would alert on every ARP packet. The coded detector owns this rule: it compares each IP against a cached MAC and alerts only on a change."
     },
     {
       "id": "SIG012",
@@ -127,7 +159,10 @@
         "burpsuite"
       ],
       "protocol": "TCP",
-      "ports": [80, 443]
+      "ports": [
+        80,
+        443
+      ]
     }
   ]
 }

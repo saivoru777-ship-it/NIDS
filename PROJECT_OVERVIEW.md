@@ -268,8 +268,28 @@ if deviation > 0.3:  # 30%
 - **Privileges**: Root/Administrator required
 
 ### Performance
-- **Packet Processing**: 1000+ packets/second
-- **Latency**: <1ms per packet
+
+Measured, not estimated. Run `python3 benchmarks/benchmark_detection.py` to
+reproduce on your own hardware; raw output is in `benchmarks/results.json`.
+
+Method: 20,000 synthesized packets (10% HTTP with URL-encoded
+SQLi, 20% DNS, ~1% ICMP, remainder TCP SYNs), timed per stage. Excludes kernel
+capture, console output and SQLite writes.
+
+| Stage | mean | p50 | p95 | p99 | throughput |
+|---|---|---|---|---|---|
+| Scapy dissection + field extraction | 273 µs | 253 µs | 408 µs | 525 µs | 3,658 pkt/s |
+| Detection chain (traffic + signature + anomaly) | 44 µs | 38 µs | 69 µs | 88 µs | 22,577 pkt/s |
+| **End to end** | **318 µs** | | | | **3,148 pkt/s** |
+
+- **Packet Processing**: 3,148 packets/second single-threaded
+  (measured 2026-09-17 on Python 3.9.6/darwin)
+- **Analysis Latency**: detection p99 88 µs — comfortably
+  inside 1 ms
+- **The bottleneck is parsing, not detection.** Scapy dissection costs
+  6.2x the detection chain, so tuning
+  detection rules would optimize a small fraction of total latency. Moving
+  capture to AF_PACKET or eBPF is the real scaling path.
 - **Baseline Time**: 5 minutes (configurable)
 - **Real-time Detection**: Yes
 
@@ -436,7 +456,7 @@ def detect_custom_attack(self, packet_info):
 **Lines of Code**: ~3,000+
 **Files**: 26 Python files
 **Modules**: 8 core modules + test suite
-**Detection Rules**: 12 signatures
+**Detection Rules**: 12 signatures (11 matched by the rule engine; SIG011 ARP spoofing is delegated to the dedicated `detect_arp_spoofing` detector, since a protocol-only rule would alert on every ARP packet)
 **Detection Techniques**: 10 attack types
 **Tests**: 60+ unit tests (pytest)
 

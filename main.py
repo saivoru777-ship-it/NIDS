@@ -10,6 +10,7 @@ import logging.handlers
 import signal
 import sys
 import os
+import threading
 
 # Add src directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -20,7 +21,6 @@ from detection.anomaly_based import AnomalyDetector
 from analysis.traffic_analyzer import TrafficAnalyzer
 from alerts.alert_manager import AlertManager
 from alerts.notifier import EmailNotifier
-from dashboard.app import start_dashboard
 from storage.database import AlertDatabase
 from utils.health import HealthMonitor
 from utils.helpers import (
@@ -89,21 +89,36 @@ class NIDS:
                                           notifier=self.notifier)
         self.signature_detector = SignatureDetector(
             self.config,
-            self.alert_manager.handle_alert
+            self._on_alert
         )
         self.anomaly_detector = AnomalyDetector(
             self.config,
-            self.alert_manager.handle_alert
+            self._on_alert
         )
         self.traffic_analyzer = TrafficAnalyzer(self.config)
         self.packet_sniffer = PacketSniffer(
             self.interface,
             self.process_packet,
-            self.config
+            self.config,
+            health_monitor=self.health
         )
 
         self.is_running = False
         self._shutdown_event = threading.Event()
+
+    def _on_alert(self, alert_data):
+        """
+        Single funnel for every alert raised by any detector.
+
+        Exists so the health metric is incremented in exactly one place: wiring
+        record_alert() into each detector separately is how the counter silently
+        drifts out of sync with reality.
+
+        Args:
+            alert_data (dict): Alert information
+        """
+        self.health.record_alert()
+        return self.alert_manager.handle_alert(alert_data)
 
     def process_packet(self, packet_info):
         """
@@ -112,14 +127,22 @@ class NIDS:
         Args:
             packet_info (dict): Packet information
         """
-        # Analyze traffic patterns
-        self.traffic_analyzer.analyze_packet(packet_info)
+        # Count the packet before analysis so throughput reflects packets seen,
+        # not packets that survived detection without raising an exception.
+        self.health.record_packet()
 
-        # Run signature-based detection
-        self.signature_detector.analyze_packet(packet_info)
+        try:
+            # Analyze traffic patterns
+            self.traffic_analyzer.analyze_packet(packet_info)
 
-        # Run anomaly-based detection
-        self.anomaly_detector.analyze_packet(packet_info)
+            # Run signature-based detection
+            self.signature_detector.analyze_packet(packet_info)
+
+            # Run anomaly-based detection
+            self.anomaly_detector.analyze_packet(packet_info)
+        except Exception as e:
+            self.health.record_error()
+            logger.error("Error processing packet: %s", e, exc_info=True)
 
     def start(self):
         """Start the NIDS"""
@@ -143,10 +166,21 @@ class NIDS:
         # Start web dashboard
         dashboard_config = self.config.get('dashboard', {})
         if dashboard_config.get('enabled', True):
-            dash_port = dashboard_config.get('port', 5000)
-            start_dashboard(self.alert_manager, self.traffic_analyzer,
-                            database=self.database, health_monitor=self.health,
-                            port=dash_port)
+            # Imported here rather than at module scope: the dashboard is
+            # optional, and Flask being absent should degrade to "no dashboard",
+            # not stop packet capture from running.
+            try:
+                from dashboard.app import start_dashboard
+            except ImportError as e:
+                logger.warning("Dashboard unavailable (%s) — continuing without it. "
+                               "Install flask to enable it.", e)
+                start_dashboard = None
+
+            if start_dashboard:
+                dash_port = dashboard_config.get('port', 5000)
+                start_dashboard(self.alert_manager, self.traffic_analyzer,
+                                database=self.database, health_monitor=self.health,
+                                port=dash_port)
 
         # Start packet capture
         self.is_running = True

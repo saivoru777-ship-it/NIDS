@@ -57,3 +57,11 @@ htmlcov/
 
 # pyenv
 .python-version
+
+# Test coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# Benchmark output is committed deliberately (results.json) but not logs
+/tmp/nids_bench_logs/

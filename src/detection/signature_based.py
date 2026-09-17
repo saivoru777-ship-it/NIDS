@@ -40,6 +40,9 @@ class SignatureDetector:
         # Alert deduplication: (alert_type, src_ip) -> last_alert_time
         self._alert_cooldowns = {}
         self._alert_cooldown_secs = 60  # suppress duplicate alerts within this window
+        # Sliding windows for signatures that fire on a rate, not a payload:
+        # (signature_id, src_ip) -> deque of timestamps
+        self.signature_trackers = defaultdict(lambda: deque(maxlen=1000))
 
     def load_signatures(self):
         """Load attack signatures from JSON file"""
@@ -108,6 +111,14 @@ class SignatureDetector:
             if self.icmp_flood_tracker[ip]['first_seen'] and \
                (current_time - self.icmp_flood_tracker[ip]['first_seen']).total_seconds() > icmp_window:
                 del self.icmp_flood_tracker[ip]
+
+        # Rate-based signature windows: drop any whose newest event is long past.
+        # Uses a generous 2x the largest configured window so a rule is never
+        # purged mid-window.
+        for key in list(self.signature_trackers):
+            window = self.signature_trackers[key]
+            if not window or (current_time - window[-1]).total_seconds() > 600:
+                del self.signature_trackers[key]
 
     def _should_suppress_alert(self, alert_type, src_ip, current_time):
         """Check if this alert should be suppressed (deduplication)"""
@@ -311,7 +322,18 @@ class SignatureDetector:
             packet_info (dict): Packet information
         """
         for signature in self.signatures:
+            # Rules with a dedicated coded detector are skipped here so the same
+            # event does not alert twice.
+            if signature.get('handled_by'):
+                continue
+
             if self.match_signature(packet_info, signature):
+                # Without this, a payload signature match alerts once per packet:
+                # 2000 SQLi packets produced 2000 alerts.
+                if self._should_suppress_alert(signature['id'], packet_info['src_ip'],
+                                               packet_info['timestamp']):
+                    continue
+
                 self.alert_callback({
                     'type': 'signature_match',
                     'severity': signature.get('severity', 'medium'),
@@ -327,7 +349,20 @@ class SignatureDetector:
 
     def match_signature(self, packet_info, signature):
         """
-        Check if packet matches a signature
+        Check if packet matches a signature.
+
+        Rules come in four shapes and each needs its own discriminator. The
+        original version only ever returned True for payload patterns or a
+        dst_port_range, so rules built on a threshold or a bare port list passed
+        the filters and then fell through to False — they could never fire.
+
+        Precedence after the protocol/port filters:
+          1. patterns       -> payload match (SIG001/002/006/012)
+          2. dst_port_range -> destination port in a suspicious set (SIG009)
+          3. threshold      -> N events from one source inside time_window
+                               (SIG003/004/008/010)
+          4. ports only     -> the port itself is the indicator (SIG005/007)
+          5. otherwise      -> no discriminator; a dedicated detector owns it
 
         Args:
             packet_info (dict): Packet information
@@ -336,18 +371,20 @@ class SignatureDetector:
         Returns:
             bool: True if matches, False otherwise
         """
-        # Check protocol
+        # Protocol filter
         if 'protocol' in signature:
             if packet_info['protocol'] != signature['protocol']:
                 return False
 
-        # Check ports
+        # Port filter
         if 'ports' in signature:
             if packet_info['dst_port'] not in signature['ports']:
                 return False
 
-        # Check patterns in payload (also URL-decode to catch encoded attacks)
-        if 'patterns' in signature and packet_info['payload']:
+        # 1. Payload patterns (also URL-decoded to catch encoded attacks)
+        if 'patterns' in signature:
+            if not packet_info['payload']:
+                return False
             try:
                 payload_str = packet_info['payload'].decode('utf-8', errors='ignore').lower()
                 decoded_payload = unquote(payload_str)
@@ -357,18 +394,67 @@ class SignatureDetector:
                         return True
             except (UnicodeDecodeError, AttributeError):
                 pass
+            return False
 
-        # Check suspicious destination port ranges
+        # 2. Suspicious destination port ranges
         if 'dst_port_range' in signature:
-            if packet_info['dst_port'] in signature['dst_port_range']:
-                return True
+            return packet_info['dst_port'] in signature['dst_port_range']
 
+        # 3. Rate-based rules
+        if 'threshold' in signature:
+            return self._check_signature_threshold(packet_info, signature)
+
+        # 4. Port-only rules: reaching here means the protocol and port filters
+        #    both passed and the port is itself the indicator.
+        if 'ports' in signature:
+            return True
+
+        # 5. Protocol-only rule with no discriminator. Matching every packet of
+        #    that protocol would be an alert storm, so a dedicated detector owns
+        #    it (see handled_by in signatures.json).
+        return False
+
+    def _check_signature_threshold(self, packet_info, signature):
+        """
+        Sliding-window rate check for threshold-based signatures.
+
+        Counts events per (signature, source IP) and fires once the count inside
+        time_window reaches threshold. The window is cleared on fire so one burst
+        produces one alert rather than one per packet past the threshold.
+
+        Args:
+            packet_info (dict): Packet information
+            signature (dict): Signature definition with threshold + time_window
+
+        Returns:
+            bool: True if the rate threshold was just crossed
+        """
+        src_ip = packet_info.get('src_ip')
+        if not src_ip:
+            return False
+
+        threshold = signature['threshold']
+        time_window = signature.get('time_window', 60)
+        current_time = packet_info['timestamp']
+
+        key = (signature['id'], src_ip)
+        window = self.signature_trackers[key]
+        window.append(current_time)
+
+        # Evict events that fell out of the window
+        while window and (current_time - window[0]).total_seconds() > time_window:
+            window.popleft()
+
+        if len(window) >= threshold:
+            window.clear()
+            return True
         return False
 
     def get_statistics(self):
         """Get detection statistics"""
         return {
             'signatures_loaded': len(self.signatures),
+            'signatures_active': sum(1 for sig in self.signatures if not sig.get('handled_by')),
             'tracked_ips': {
                 'port_scan': len(self.port_scan_tracker),
                 'syn_flood': len(self.syn_flood_tracker),

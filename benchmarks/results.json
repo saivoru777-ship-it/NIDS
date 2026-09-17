@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-09-17T15:04:17",
+  "python": "3.9.6",
+  "platform": "darwin",
+  "packets_measured": 20000,
+  "alerts_raised": 2003,
+  "stages": [
+    {
+      "stage": "scapy_parse",
+      "samples": 20000,
+      "mean_us": 273.34,
+      "p50_us": 252.96,
+      "p95_us": 407.5,
+      "p99_us": 524.81,
+      "max_us": 32158.67,
+      "throughput_pps": 3658
+    },
+    {
+      "stage": "detection",
+      "samples": 20000,
+      "mean_us": 44.29,
+      "p50_us": 38.38,
+      "p95_us": 69.46,
+      "p99_us": 87.5,
+      "max_us": 49683.04,
+      "throughput_pps": 22577
+    }
+  ],
+  "end_to_end": {
+    "mean_us_per_packet": 317.63,
+    "throughput_pps": 3148
+  }
+}
